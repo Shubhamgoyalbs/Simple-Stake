@@ -71,9 +71,6 @@ pub fn claim_balance(ctx: Context<ClaimBalance>) -> Result<()> {
 
 pub fn stake_asset(ctx: Context<StakeAsset>, amount: u64, lock_duration: i64) -> Result<()> {
   let accounts = ctx.accounts;
-  if accounts.stake_pda.is_staked {
-    return err!(StakeProgramError::InvalidInput);
-  }
   if amount < accounts.pool_pda.min_stake_required {
     return err!(StakeProgramError::InvalidInput);
   }
@@ -88,20 +85,65 @@ pub fn stake_asset(ctx: Context<StakeAsset>, amount: u64, lock_duration: i64) ->
     },
   );
   
+  if (accounts.pool_pda.total_staked + amount) as i64 * accounts.pool_pda.reward_rate as i64 * lock_duration > accounts.pool_pda.reward_rate as i64 {
+    accounts.pool_pda.is_active = false;
+    return err!(StakeProgramError::InvalidInput)
+  }
+  
   transfer(cpi_ctx, amount)?;
   accounts.stake_pda.user = *accounts.signer.key;
   accounts.stake_pda.pool = accounts.pool_pda.key();
-  accounts.stake_pda.is_staked = true;
   accounts.stake_pda.staked_at = Clock::get()?.unix_timestamp;
   accounts.stake_pda.lock_duration = lock_duration;
   accounts.stake_pda.amount = amount;
   accounts.stake_pda.bump = ctx.bumps.stake_pda;
-  
   accounts.pool_pda.total_staked += amount;
   Ok(())
 }
-//unstake (all money came to its pda),
-// fund pool always reach min lock duration * (total staked + min stake) * reward rate,
-// claim reward resevve only if staking is closed and no staker remains here,
-// note can check if avialable reward reserve then add else close accepting stake for that pool
 
+pub fn un_stake_asset(ctx: Context<UnStakeAsset>) -> Result<()> {
+  **ctx.accounts.user_pda.to_account_info().try_borrow_mut_lamports()? += ctx.accounts.stake_pda.amount;
+  **ctx.accounts.stake_pda.to_account_info().try_borrow_mut_lamports()? -= ctx.accounts.stake_pda.amount;
+  
+  let pool_data = &mut ctx.accounts.pool_pda;
+  let reward = (Clock::get()?.unix_timestamp - ctx.accounts.stake_pda.staked_at) as u64 * ctx.accounts.stake_pda.amount * pool_data.reward_rate;
+  pool_data.reward_reserve -= reward;
+  pool_data.total_staked -= ctx.accounts.stake_pda.amount;
+  **ctx.accounts.user_pda.to_account_info().try_borrow_mut_lamports()? += reward;
+  **ctx.accounts.pool_pda.to_account_info().try_borrow_mut_lamports()? -= reward;
+  Ok(())
+}
+
+pub fn fund_pool(ctx: Context<FundPool>, amount: u64) -> Result<()> {
+  let pool_data = &ctx.accounts.pool_pda;
+  //here 10 tell that if reserve not able to fulfill at least 10 staker's reward we are not able to make
+  if amount < ((pool_data.min_stake_required * 10 + pool_data.total_staked) * pool_data.reward_rate * pool_data.min_lock_duration as u64) - pool_data.reward_reserve {
+    return err!(StakeProgramError::InsufficientBalance);
+  }
+  let cpi_ctx = CpiContext::new(
+    ctx.accounts.system_program.to_account_info(),
+    Transfer {
+      from: ctx.accounts.signer.to_account_info(),
+      to: ctx.accounts.pool_pda.to_account_info(),      // pool PDA holds the asset
+    },
+  );
+  transfer(cpi_ctx, amount)?;
+  let pool = &mut ctx.accounts.pool_pda;
+  pool.reward_reserve += amount;
+  Ok(())
+}
+
+pub fn claim_reward_reserve(ctx: Context<ClaimRewardReserve>) -> Result<()> {
+  let pool_data = &ctx.accounts.pool_pda;
+  if pool_data.is_active || pool_data.total_staked != 0 {
+    return err!(StakeProgramError::InvalidInput);
+  }
+  
+  //todo cpi for transferring from pda to pool authority
+  
+  let pool = &mut ctx.accounts.pool_pda;
+  pool.reward_reserve = 0;
+  Ok(())
+}
+
+//todo emit in stake so we can tell pool creator that its pool is closed (to pass pool id and authority)

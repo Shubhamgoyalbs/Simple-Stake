@@ -53,10 +53,45 @@ pub struct ClaimBalance<'info> {
 }
 
 #[derive(Accounts)]
+pub struct UnStakeAsset<'info> {
+  #[account(
+    mut,
+    seeds = [
+      b"stake",
+      signer.key().as_ref(),
+      pool_pda.key().as_ref(),
+    ],
+    bump = stake_pda.bump,
+    close = user_pda
+  )]
+  pub stake_pda: Account<'info, StakePosition>,
+  
+  #[account(
+    mut,
+    seeds = [
+      "user".as_ref(),
+      signer.key().as_ref()
+    ],
+    bump = user_pda.bump
+  )]
+  pub user_pda: Account<'info, User>,
+  
+  #[account(
+    mut,
+    seeds = [b"pool", pool_pda.authority.as_ref()],
+    bump = pool_pda.bump,
+  )]
+  pub pool_pda: Account<'info, Pool>,
+  
+  #[account(mut)]
+  pub signer: Signer<'info>,
+}
+
+#[derive(Accounts)]
 #[instruction(amount: u64, lock_duration: i64)]
 pub struct StakeAsset<'info> {
   #[account(
-    init_if_needed,
+    init,
     payer = signer,
     space = 8 + StakePosition::INIT_SPACE,
     seeds = [
@@ -75,6 +110,34 @@ pub struct StakeAsset<'info> {
   )]
   pub pool_pda: Account<'info, Pool>,
   
+  #[account(mut)]
+  pub signer: Signer<'info>,
+  pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(amount: u64)]
+pub struct FundPool<'info> {
+  #[account(
+    mut,
+    seeds = [b"pool", pool_pda.authority.as_ref()],
+    bump = pool_pda.bump,
+  )]
+  pub pool_pda: Account<'info, Pool>,
+  #[account(mut)]
+  pub signer: Signer<'info>,
+  pub system_program: Program<'info, System>,
+}
+
+
+#[derive(Accounts)]
+pub struct ClaimRewardReserve<'info> {
+  #[account(
+    mut,
+    seeds = [b"pool", pool_pda.authority.as_ref()],
+    bump = pool_pda.bump,
+  )]
+  pub pool_pda: Account<'info, Pool>,
   #[account(mut)]
   pub signer: Signer<'info>,
   pub system_program: Program<'info, System>,
@@ -101,8 +164,6 @@ pub struct StakePosition {
   pub staked_at: i64,        // unix timestamp
   pub lock_duration: i64,    // duration in seconds
   
-  pub is_staked: bool,     // simple flag
-  
   pub bump: u8,
 }
 
@@ -111,7 +172,7 @@ pub struct StakePosition {
 pub struct Pool {
   pub authority: Pubkey,          // pool creator/admin
   
-  pub reward_rate: u64,          // reward per second (or define clearly), 1e6 precision
+  pub reward_rate: u64,          // reward per second (or define clearly), 1e9 precision (fraction)
   pub min_stake_required: u64,   // minimum stake required to get rewards
   
   pub min_lock_duration: i64,     // minimum lock time required
